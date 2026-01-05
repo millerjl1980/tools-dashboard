@@ -1,0 +1,226 @@
+@page "/imageresizer"
+@using System.IO
+@using Microsoft.AspNetCore.Components.Forms
+@inject IJSRuntime JSRuntime
+@inject HttpClient Http
+
+<PageTitle>Image Resizer</PageTitle>
+
+<div class="container mt-5">
+    <h1 class="text-center mb-4">Image Resizer</h1>
+    
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card">
+                <div class="card-body">
+                    @if (!string.IsNullOrEmpty(errorMessage))
+                    {
+                        <div class="alert alert-danger">@errorMessage</div>
+                    }
+
+                    <EditForm Model="@imageModel" OnValidSubmit="HandleValidSubmit">
+                        <DataAnnotationsValidator />
+                        <ValidationSummary />
+
+                        <div class="mb-3">
+                            <label for="imageFile" class="form-label">Select Image</label>
+                            <InputFile id="imageFile" class="form-control" OnChange="LoadImage" accept="image/*" />
+                            <div class="form-text">Supported formats: JPG, PNG, GIF, BMP, WEBP</div>
+                            @if (imagePreview != null)
+                            {
+                                <div class="mt-2">
+                                    <small>Selected: @imageFileName (@FormatFileSize(imageFileSize))</small>
+                                </div>
+                            }
+                        </div>
+                        
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label for="maxWidth" class="form-label">Max Width (px)</label>
+                                    <InputNumber id="maxWidth" class="form-control" @bind-Value="imageModel.MaxWidth" placeholder="400" />
+                                    <ValidationMessage For="@(() => imageModel.MaxWidth)" />
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="mb-3">
+                                    <label for="maxHeight" class="form-label">Max Height (px)</label>
+                                    <InputNumber id="maxHeight" class="form-control" @bind-Value="imageModel.MaxHeight" placeholder="400" />
+                                    <ValidationMessage For="@(() => imageModel.MaxHeight)" />
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="targetSizeKB" class="form-label">Target Size (KB)</label>
+                            <InputNumber id="targetSizeKB" class="form-control" @bind-Value="imageModel.TargetSizeKB" step="1" placeholder="2048" />
+                            <div class="form-text">Leave empty to resize by dimensions only</div>
+                            <ValidationMessage For="@(() => imageModel.TargetSizeKB)" />
+                        </div>
+                        
+                        <button type="submit" class="btn btn-primary" disabled="@isProcessing">
+                            @if (isProcessing)
+                            {
+                                <span>Processing...</span>
+                            }
+                            else
+                            {
+                                <span>Resize Image</span>
+                            }
+                        </button>
+                    </EditForm>
+                </div>
+            </div>
+            
+            @if (resizedImageData != null && !string.IsNullOrEmpty(resizedImageContentType))
+            {
+                <div class="mt-4">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="card-title">Resized Image</h5>
+                            <div class="preview-container text-center">
+                                <img src="@resizedImagePreview" class="preview-image img-fluid" alt="Resized image" />
+                            </div>
+                            <div class="mt-3">
+                                <p><strong>Original Size:</strong> @FormatFileSize(imageFileSize)</p>
+                                <p><strong>New Size:</strong> @FormatFileSize(resizedImageSize)</p>
+                                <button class="btn btn-success" @onclick="DownloadResizedImage">Download</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    private ImageModel imageModel = new();
+    private IBrowserFile? selectedFile;
+    private string? imagePreview;
+    private string? imageFileName;
+    private long imageFileSize;
+    private byte[]? resizedImageData;
+    private string? resizedImageContentType;
+    private long resizedImageSize;
+    private string? resizedImagePreview;
+    private bool isProcessing = false;
+    private string? errorMessage = null;
+
+    private async Task LoadImage(InputFileChangeEventArgs e)
+    {
+        errorMessage = null;
+        selectedFile = e.File;
+        imageFileName = selectedFile.Name;
+        imageFileSize = selectedFile.Size;
+
+        // Validate file type
+        var allowedTypes = new[] { "image/jpeg", "image/jpg", "image/png", "image/gif", "image/bmp", "image/webp" };
+        if (!allowedTypes.Contains(selectedFile.ContentType))
+        {
+            errorMessage = "Please select a valid image file (JPG, PNG, GIF, BMP, WEBP)";
+            selectedFile = null;
+            return;
+        }
+
+        // Validate file size (20MB limit)
+        if (selectedFile.Size > 20 * 1024 * 1024)
+        {
+            errorMessage = $"File size too large. Maximum size is {FormatFileSize(20 * 1024 * 1024)}";
+            selectedFile = null;
+            return;
+        }
+
+        // Create preview
+        using var stream = selectedFile.OpenReadStream();
+        using var memoryStream = new MemoryStream();
+        await stream.CopyToAsync(memoryStream);
+        var buffer = memoryStream.ToArray();
+        imagePreview = $"data:{selectedFile.ContentType};base64,{Convert.ToBase64String(buffer)}";
+    }
+
+    private async Task HandleValidSubmit()
+    {
+        if (selectedFile == null)
+        {
+            errorMessage = "Please select an image file";
+            return;
+        }
+
+        isProcessing = true;
+        errorMessage = null;
+
+        try
+        {
+            using var content = new MultipartFormDataContent();
+
+            // Add image file
+            using var fileStream = selectedFile.OpenReadStream(20 * 1024 * 1024); // 20MB limit
+            using var memoryStream = new MemoryStream();
+            await fileStream.CopyToAsync(memoryStream);
+            var fileContent = new ByteArrayContent(memoryStream.ToArray());
+            fileContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(selectedFile.ContentType);
+            content.Add(fileContent, "image", selectedFile.Name);
+
+            // Add parameters
+            if (imageModel.MaxWidth.HasValue)
+                content.Add(new StringContent(imageModel.MaxWidth.Value.ToString()), "maxWidth");
+            if (imageModel.MaxHeight.HasValue)
+                content.Add(new StringContent(imageModel.MaxHeight.Value.ToString()), "maxHeight");
+            if (imageModel.TargetSizeKB.HasValue)
+                content.Add(new StringContent(imageModel.TargetSizeKB.Value.ToString()), "targetSize");
+
+            // Call the Azure Function
+            var response = await Http.PostAsync("/api/ResizeImage", content);
+
+            if (response.IsSuccessStatusCode)
+            {
+                resizedImageData = await response.Content.ReadAsByteArrayAsync();
+                resizedImageContentType = response.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
+                resizedImageSize = resizedImageData.Length;
+                resizedImagePreview = $"data:{resizedImageContentType};base64,{Convert.ToBase64String(resizedImageData)}";
+            }
+            else
+            {
+                var errorContent = await response.Content.ReadAsStringAsync();
+                errorMessage = $"Error resizing image: {response.ReasonPhrase}. {errorContent}";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error processing image: {ex.Message}";
+        }
+        finally
+        {
+            isProcessing = false;
+        }
+    }
+
+    private async Task DownloadResizedImage()
+    {
+        if (resizedImageData != null && !string.IsNullOrEmpty(resizedImageContentType))
+        {
+            var fileName = $"resized_{imageFileName ?? "image.jpg"}";
+            await JSRuntime.InvokeVoidAsync("downloadFile", fileName, resizedImageContentType, resizedImageData);
+        }
+    }
+
+    private string FormatFileSize(long bytes)
+    {
+        if (bytes == 0) return "0 Bytes";
+
+        var k = 1024;
+        var sizes = new[] { "Bytes", "KB", "MB", "GB" };
+        var i = Math.Floor(Math.Log(bytes) / Math.Log(k));
+        var size = Math.Round(bytes / Math.Pow(k, i), 2);
+
+        return $"{size} {sizes[(int)i]}";
+    }
+
+    public class ImageModel
+    {
+        public int? MaxWidth { get; set; }
+        public int? MaxHeight { get; set; }
+        public int? TargetSizeKB { get; set; }
+    }
+}
